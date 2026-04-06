@@ -1,3 +1,8 @@
+# About this fork
+
+This is my fork of Tilda, tailored for use with i3 and focused on improving
+behavior in dynamic multi-monitor setups.
+
 # What is Tilda?
 
 Tilda is a terminal emulator and can be compared with other popular terminal emulators such as
