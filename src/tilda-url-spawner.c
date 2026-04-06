@@ -73,26 +73,55 @@ void tilda_url_spawner_spawn_browser_for_match (GtkWindow * parent,
     g_free (uri);
 }
 
-void launch_configured_web_browser (const char * match)
+static gchar **
+build_browser_argv (const gchar *browser_cmd,
+                    const gchar *match)
 {
-    gchar * cmd;
-    gchar * web_browser_cmd;
-    gboolean result;
+    gchar **argv = NULL;
+    gint argc = 0;
+    GError *error = NULL;
 
-    web_browser_cmd = g_strescape (config_getstr ("web_browser"), NULL);
-    cmd = g_strdup_printf ("%s %s", web_browser_cmd, match);
-
-    g_debug ("Launching command: `%s'", cmd);
-
-    result = g_spawn_command_line_async (cmd, NULL);
-
-    /* Check that the command launched */
-    if (!result)
+    if (!g_shell_parse_argv (browser_cmd, &argc, &argv, &error))
     {
-        g_critical (_("Failed to launch the web browser. The command was `%s'\n"), cmd);
-        TILDA_PERROR ();
+        g_critical (_("Failed to parse web browser command `%s': %s\n"),
+                    browser_cmd, error->message);
+        g_error_free (error);
+        return NULL;
     }
 
-    g_free (web_browser_cmd);
-    g_free (cmd);
+    argv = g_realloc (argv, (argc + 2) * sizeof (gchar *));
+    argv[argc]     = g_strdup (match);
+    argv[argc + 1] = NULL;
+
+    return argv;
+}
+
+void launch_configured_web_browser (const char * match)
+{
+    const gchar *browser_cmd = config_getstr ("web_browser");
+    gchar **argv = build_browser_argv (browser_cmd, match);
+
+    if (argv == NULL)
+        return;
+
+    GError *error = NULL;
+
+    g_debug ("Launching browser: `%s' with url: `%s'", browser_cmd, match);
+
+    gboolean result = g_spawn_async (NULL,
+                                     argv,
+                                     NULL,
+                                     G_SPAWN_SEARCH_PATH,
+                                     NULL, NULL, NULL,
+                                     &error);
+
+    if (!result)
+    {
+        g_critical (_("Failed to launch the web browser `%s': %s\n"),
+                    browser_cmd, error->message);
+        TILDA_PERROR ();
+        g_clear_error (&error);
+    }
+
+    g_strfreev (argv);
 }
