@@ -49,6 +49,8 @@ static GdkFilterReturn window_filter_function (GdkXEvent *xevent,
                                                GdkEvent *event,
                                                gpointer data);
 
+static void monitors_changed_cb (GdkScreen *screen, gpointer user_data);
+
 static void
 tilda_window_setup_alpha_mode (tilda_window *tw)
 {
@@ -1078,6 +1080,12 @@ gboolean tilda_window_init (const gchar *config_file, const gint instance, tilda
 
     gdk_window_add_filter (root, window_filter_function, tw);
 
+    /* Also connect to the GdkScreen monitors-changed signal. This fires when
+     * a monitor is added or removed and is needed for WMs (such as i3) that
+     * do not set _NET_WORKAREA and therefore never trigger window_filter_function. */
+    g_signal_connect (screen, "monitors-changed",
+                      G_CALLBACK (monitors_changed_cb), tw);
+
     return TRUE;
 }
 
@@ -1266,15 +1274,29 @@ GdkMonitor* tilda_window_find_monitor_number (tilda_window *tw)
     DEBUG_FUNCTION ("tilda_window_find_monitor_number");
 
     GdkDisplay *display = gdk_display_get_default ();
-    gint n_monitors = gdk_display_get_n_monitors (gdk_display_get_default ());
-
+    gint n_monitors = gdk_display_get_n_monitors (display);
     gchar *show_on_monitor = config_getstr("show_on_monitor");
 
-    for(int i = 0; i < n_monitors; ++i) {
+    for (int i = 0; i < n_monitors; ++i) {
         GdkMonitor *monitor = gdk_display_get_monitor (display, i);
-        const gchar *monitor_name = gdk_monitor_get_model (monitor);
-        if(0 == g_strcmp0 (show_on_monitor, monitor_name)) {
+        const gchar *model = gdk_monitor_get_model (monitor);
+        if (g_strcmp0 (show_on_monitor, model) == 0) {
             return monitor;
+        }
+    }
+
+    /* No named monitor matched. If the tilda window is already realized and
+     * on screen, return the monitor it currently occupies. This keeps Tilda
+     * on the same monitor when the layout changes (e.g. a second monitor is
+     * added to the left in i3 where no X11 primary is set). */
+    if (tw != NULL && tw->window != NULL &&
+        gtk_widget_get_realized (GTK_WIDGET (tw->window))) {
+        GdkWindow *gdk_win = gtk_widget_get_window (GTK_WIDGET (tw->window));
+        if (gdk_win != NULL) {
+            GdkMonitor *current = gdk_display_get_monitor_at_window (display,
+                                                                      gdk_win);
+            if (current != NULL)
+                return current;
         }
     }
 
@@ -1379,6 +1401,25 @@ static gboolean update_tilda_window_size (gpointer user_data)
     tw->size_update_event_source = 0;
 
     return G_SOURCE_REMOVE;
+}
+
+/**
+ * Handles the GdkScreen::monitors-changed signal fired when a monitor is
+ * added or removed. This is the primary update path for window managers that
+ * do not set _NET_WORKAREA (e.g. i3). A short timeout gives the WM time to
+ * finish reconfiguring before the new geometry is queried.
+ */
+static void
+monitors_changed_cb (G_GNUC_UNUSED GdkScreen *screen, gpointer user_data)
+{
+    tilda_window *tw = user_data;
+
+    if (tw->size_update_event_source != 0)
+        return;
+
+    tw->size_update_event_source = g_timeout_add (300,
+                                                   update_tilda_window_size,
+                                                   tw);
 }
 
 /**
