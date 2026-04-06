@@ -51,6 +51,10 @@ static GdkFilterReturn window_filter_function (GdkXEvent *xevent,
 
 static void monitors_changed_cb (GdkScreen *screen, gpointer user_data);
 
+static gboolean window_state_event_cb (GtkWidget *widget,
+                                       GdkEventWindowState *event,
+                                       gpointer user_data);
+
 static void
 tilda_window_setup_alpha_mode (tilda_window *tw)
 {
@@ -196,6 +200,33 @@ gint toggle_fullscreen_cb (tilda_window *tw)
     // It worked. Having this return GDK_EVENT_STOP makes the callback not carry the
     // keystroke into the vte terminal widget.
     return GDK_EVENT_STOP;
+}
+
+/**
+ * Tracks WM-driven fullscreen state changes (e.g. i3 mod+f) which bypass
+ * toggle_fullscreen_cb. When the window leaves fullscreen, restore the
+ * configured size and position so the window returns to its normal dimensions.
+ */
+static gboolean
+window_state_event_cb (GtkWidget          *widget,
+                       GdkEventWindowState *event,
+                       gpointer            user_data)
+{
+    tilda_window *tw = user_data;
+
+    if (!(event->changed_mask & GDK_WINDOW_STATE_FULLSCREEN))
+        return GDK_EVENT_PROPAGATE;
+
+    tw->fullscreen = (event->new_window_state & GDK_WINDOW_STATE_FULLSCREEN) != 0;
+
+    if (!tw->fullscreen) {
+        GdkRectangle r;
+        config_get_configured_window_size (&r);
+        gtk_window_resize (GTK_WINDOW (tw->window), r.width, r.height);
+        tilda_window_update_window_position (tw);
+    }
+
+    return GDK_EVENT_PROPAGATE;
 }
 
 void tilda_window_set_dbus_enabled (tilda_window *tw, gboolean enabled)
@@ -1013,6 +1044,11 @@ gboolean tilda_window_init (const gchar *config_file, const gint instance, tilda
     g_signal_connect (G_OBJECT(tw->window), "enter-notify-event", G_CALLBACK (mouse_enter), tw);
     g_signal_connect (G_OBJECT(tw->window), "leave-notify-event", G_CALLBACK (mouse_leave), tw);
 
+    /* Track WM-driven fullscreen changes (e.g. i3 mod+f) that bypass
+     * toggle_fullscreen_cb, so we can restore size on unfullscreen. */
+    g_signal_connect (G_OBJECT(tw->window), "window-state-event",
+                      G_CALLBACK (window_state_event_cb), tw);
+
     /* We need this signal to detect changes in the order of tabs so that we can keep the order
      * of tilda_terms in the tw->terms structure in sync with the order of tabs. */
     g_signal_connect (G_OBJECT(tw->notebook), "page-reordered", G_CALLBACK (page_reordered_cb), tw);
@@ -1370,34 +1406,27 @@ static gboolean update_tilda_window_size (gpointer user_data)
     g_debug ("Updating tilda window size in idle handler to "
              "match new size of workarea.");
 
-    /* 1. Get current tilda window size */
-    int windowHeight = gtk_widget_get_allocated_height (GTK_WIDGET (tw->window));
-    int windowWidth = gtk_widget_get_allocated_width (GTK_WIDGET (tw->window));
+    /* Skip while fullscreen — window_state_event_cb handles restoration
+     * when the WM exits fullscreen mode. */
+    if (tw->fullscreen) {
+        tw->size_update_event_source = 0;
+        return G_SOURCE_REMOVE;
+    }
 
-    gint newWidth = windowWidth;
-    gint newHeight = windowHeight;
-
-    /* 2. Get the desired size and update the tilda window size if necessary. */
+    /* Recompute the configured pixel size (percentage of current workarea)
+     * and apply it unconditionally. This handles both growth (workarea grew)
+     * and shrinkage (workarea shrank, or window was just unfullscreened). */
     GdkRectangle configured_geometry;
     config_get_configured_window_size (&configured_geometry);
 
-    if (configured_geometry.width - windowWidth >= 1) {
-        newWidth = configured_geometry.width;
-    }
-
-    if (configured_geometry.height - windowHeight >= 1) {
-        newHeight = configured_geometry.height;
-    }
-
     gtk_window_resize (GTK_WINDOW (tw->window),
-                       newWidth,
-                       newHeight);
+                       configured_geometry.width,
+                       configured_geometry.height);
 
     tilda_window_update_window_position (tw);
 
-    /* 3. Returning G_SOURCE_REMOVE below will clear the event source in Gtk.
-     * Thus, we need to reset the ID such that a new event source can be
-     * registered if the workarea changes again. */
+    /* Returning G_SOURCE_REMOVE clears the event source in Gtk.
+     * Reset the ID so a new event source can be registered next time. */
     tw->size_update_event_source = 0;
 
     return G_SOURCE_REMOVE;
