@@ -3,6 +3,15 @@
 This is my fork of Tilda, tailored for use with i3 and focused on improving
 behavior in dynamic multi-monitor setups.
 
+Development in this fork happens directly on the main branch, with releases
+created by tagging commits.
+
+This fork is maintained for personal use and is not a stable or community-driven
+project. Use the upstream version for that.
+
+It may be useful if you specifically need improved behavior with i3 and dynamic
+multi-monitor setups.
+
 # What is Tilda?
 
 Tilda is a terminal emulator and can be compared with other popular terminal emulators such as
