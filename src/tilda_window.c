@@ -55,6 +55,25 @@ static gboolean window_state_event_cb (GtkWidget *widget,
                                        GdkEventWindowState *event,
                                        gpointer user_data);
 
+static void tilda_window_reset_size_update_source (tilda_window *tw);
+
+static void tilda_window_clear_size_update_source (tilda_window *tw);
+
+static void tilda_window_set_size_update_source (tilda_window *tw,
+                                                 guint source_id,
+                                                 gboolean is_fallback);
+
+static void tilda_window_restore_configured_geometry (tilda_window *tw);
+
+static void tilda_window_queue_size_update_idle (tilda_window *tw);
+
+static void tilda_window_queue_size_update_fallback (tilda_window *tw,
+                                                     guint interval_ms);
+
+static void tilda_window_queue_size_update_from_workarea (tilda_window *tw);
+
+static gboolean is_workarea_property_event (XEvent *xevent);
+
 static void
 tilda_window_setup_alpha_mode (tilda_window *tw)
 {
@@ -202,6 +221,77 @@ gint toggle_fullscreen_cb (tilda_window *tw)
     return GDK_EVENT_STOP;
 }
 
+static void
+tilda_window_reset_size_update_source (tilda_window *tw)
+{
+    tw->size_update_event_source = 0;
+    tw->size_update_source_is_fallback = FALSE;
+}
+
+static void
+tilda_window_clear_size_update_source (tilda_window *tw)
+{
+    if (tw->size_update_event_source != 0)
+        g_source_remove (tw->size_update_event_source);
+
+    tilda_window_reset_size_update_source (tw);
+}
+
+static void
+tilda_window_set_size_update_source (tilda_window *tw,
+                                     guint source_id,
+                                     gboolean is_fallback)
+{
+    tw->size_update_event_source = source_id;
+    tw->size_update_source_is_fallback = is_fallback;
+}
+
+static void
+tilda_window_restore_configured_geometry (tilda_window *tw)
+{
+    GdkRectangle configured_geometry;
+
+    config_get_configured_window_size (&configured_geometry);
+    gtk_window_resize (GTK_WINDOW (tw->window),
+                       configured_geometry.width,
+                       configured_geometry.height);
+    tilda_window_update_window_position (tw);
+}
+
+static void
+tilda_window_queue_size_update_idle (tilda_window *tw)
+{
+    guint source_id = g_idle_add (update_tilda_window_size, tw);
+
+    tilda_window_set_size_update_source (tw, source_id, FALSE);
+}
+
+static void
+tilda_window_queue_size_update_fallback (tilda_window *tw,
+                                         guint interval_ms)
+{
+    guint source_id;
+
+    if (tw->size_update_event_source != 0)
+        return;
+
+    source_id = g_timeout_add (interval_ms, update_tilda_window_size, tw);
+    tilda_window_set_size_update_source (tw, source_id, TRUE);
+}
+
+static void
+tilda_window_queue_size_update_from_workarea (tilda_window *tw)
+{
+    if (tw->size_update_event_source != 0 &&
+        !tw->size_update_source_is_fallback)
+        return;
+
+    if (tw->size_update_source_is_fallback)
+        tilda_window_clear_size_update_source (tw);
+
+    tilda_window_queue_size_update_idle (tw);
+}
+
 /**
  * Tracks WM-driven fullscreen state changes (e.g. i3 mod+f) which bypass
  * toggle_fullscreen_cb. When the window leaves fullscreen, restore the
@@ -219,12 +309,8 @@ window_state_event_cb (GtkWidget          *widget,
 
     tw->fullscreen = (event->new_window_state & GDK_WINDOW_STATE_FULLSCREEN) != 0;
 
-    if (!tw->fullscreen) {
-        GdkRectangle r;
-        config_get_configured_window_size (&r);
-        gtk_window_resize (GTK_WINDOW (tw->window), r.width, r.height);
-        tilda_window_update_window_position (tw);
-    }
+    if (!tw->fullscreen)
+        tilda_window_restore_configured_geometry (tw);
 
     return GDK_EVENT_PROPAGATE;
 }
@@ -1148,7 +1234,7 @@ gint tilda_window_free (tilda_window *tw)
         g_object_unref (G_OBJECT(tw->gtk_builder));
     }
 
-    tw->size_update_event_source = 0;
+    tilda_window_clear_size_update_source (tw);
 
     return 0;
 }
@@ -1403,31 +1489,21 @@ static gboolean update_tilda_window_size (gpointer user_data)
 {
     tilda_window *tw = user_data;
 
-    g_debug ("Updating tilda window size in idle handler to "
+    g_debug ("Updating tilda window size in scheduled handler to "
              "match new size of workarea.");
 
     /* Skip while fullscreen — window_state_event_cb handles restoration
      * when the WM exits fullscreen mode. */
     if (tw->fullscreen) {
-        tw->size_update_event_source = 0;
+        tilda_window_reset_size_update_source (tw);
         return G_SOURCE_REMOVE;
     }
 
-    /* Recompute the configured pixel size (percentage of current workarea)
-     * and apply it unconditionally. This handles both growth (workarea grew)
-     * and shrinkage (workarea shrank, or window was just unfullscreened). */
-    GdkRectangle configured_geometry;
-    config_get_configured_window_size (&configured_geometry);
-
-    gtk_window_resize (GTK_WINDOW (tw->window),
-                       configured_geometry.width,
-                       configured_geometry.height);
-
-    tilda_window_update_window_position (tw);
+    tilda_window_restore_configured_geometry (tw);
 
     /* Returning G_SOURCE_REMOVE clears the event source in Gtk.
      * Reset the ID so a new event source can be registered next time. */
-    tw->size_update_event_source = 0;
+    tilda_window_reset_size_update_source (tw);
 
     return G_SOURCE_REMOVE;
 }
@@ -1443,12 +1519,22 @@ monitors_changed_cb (G_GNUC_UNUSED GdkScreen *screen, gpointer user_data)
 {
     tilda_window *tw = user_data;
 
-    if (tw->size_update_event_source != 0)
-        return;
+    tilda_window_queue_size_update_fallback (tw, 300);
+}
 
-    tw->size_update_event_source = g_timeout_add (300,
-                                                   update_tilda_window_size,
-                                                   tw);
+static gboolean
+is_workarea_property_event (XEvent *xevent)
+{
+    XPropertyEvent *property_event;
+    Atom workarea_atom;
+
+    if (xevent->type != PropertyNotify)
+        return FALSE;
+
+    property_event = (XPropertyEvent *) xevent;
+    workarea_atom = XInternAtom (property_event->display, "_NET_WORKAREA", True);
+
+    return property_event->atom == workarea_atom;
 }
 
 /**
@@ -1469,34 +1555,12 @@ static GdkFilterReturn window_filter_function (GdkXEvent *gdk_xevent,
                                                GdkEvent *event,
                                                gpointer user_data)
 {
-    tilda_window *tw = user_data;
-
     XEvent *xevent = (XEvent *) gdk_xevent;
 
-    switch (xevent->type)
-    {
-        case PropertyNotify:
-        {
-            XPropertyEvent *propertyEvent;
+    if (!is_workarea_property_event (xevent))
+        return GDK_FILTER_CONTINUE;
 
-            propertyEvent = (XPropertyEvent *) xevent;
-
-            const Atom WORKAREA_ATOM = XInternAtom (propertyEvent->display,
-                                                    "_NET_WORKAREA", True);
-
-            if (propertyEvent->atom != WORKAREA_ATOM)
-                return GDK_FILTER_CONTINUE;
-
-            if (tw->size_update_event_source != 0)
-                return GDK_FILTER_CONTINUE;
-
-            tw->size_update_event_source = g_idle_add (update_tilda_window_size,
-                                                       user_data);
-
-            break;
-        }
-        default:break;
-    }
+    tilda_window_queue_size_update_from_workarea (user_data);
 
     return GDK_FILTER_CONTINUE;
 }

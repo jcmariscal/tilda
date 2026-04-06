@@ -95,6 +95,12 @@ struct tilda_window_
      * This stores the ID of the event source which handles size updates.
      */
     guint size_update_event_source;
+
+    /**
+     * TRUE when the current size update source is a monitor-change timeout
+     * fallback that should yield to a later _NET_WORKAREA update.
+     */
+    gboolean size_update_source_is_fallback;
 };
 
 /* For use in get_display_dimension() */
