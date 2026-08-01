@@ -454,16 +454,22 @@ gint config_init (const gchar *config_file)
     return ret;
 }
 
-static GdkMonitor *config_get_configured_monitor ()
+static GdkMonitor *config_get_configured_monitor (void)
 {
-    gint x_pos = (gint) config_getint ("x_pos");
-    gint y_pos = (gint) config_getint ("y_pos");
-
     GdkDisplay *display = gdk_display_get_default ();
+    const gchar *configured_model = config_getstr ("show_on_monitor");
+    gint n_monitors = gdk_display_get_n_monitors (display);
+
+    for (gint i = 0; i < n_monitors; ++i) {
+        GdkMonitor *monitor = gdk_display_get_monitor (display, i);
+
+        if (g_strcmp0 (configured_model, gdk_monitor_get_model (monitor)) == 0)
+            return monitor;
+    }
 
     return gdk_display_get_monitor_at_point (display,
-                                             x_pos,
-                                             y_pos);
+                                             (gint) config_getint ("x_pos"),
+                                             (gint) config_getint ("y_pos"));
 }
 
 void config_get_configured_window_size (GdkRectangle *rectangle)
